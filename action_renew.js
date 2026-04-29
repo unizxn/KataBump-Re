@@ -219,7 +219,6 @@ function getUsers() {
     return [];
 }
 
-
 // --- 核心辅助：通过 CDP 派发鼠标点击事件 ---
 async function dispatchCdpClick(page, x, y) {
     const client = await page.context().newCDPSession(page);
@@ -340,10 +339,19 @@ async function solveTurnstileIfPresent(page, stageName = "登录", maxAttempts =
 // ==========================================
 async function checkAltchaSuccess(page) {
     try {
-        // ALTCHA 成功后会生成一个包含了哈希值的 input 隐藏字段
+        // ALTCHA 官方组件状态检查：检查内部 state 或隐藏的 input
         const isSolved = await page.evaluate(() => {
-            const val = document.querySelector('input[name="altcha"]')?.value;
-            return val && val.trim().length > 0;
+            const widget = document.querySelector('altcha-widget');
+            if (widget) {
+                // 如果组件自己说验证过了，那就肯定过了
+                if (widget.state === 'verified') return true;
+                if (widget.value && String(widget.value).length > 0) return true;
+            }
+            // 备用：检查表单中是否有隐藏的 value
+            const input = document.querySelector('input[name="altcha"]');
+            if (input && input.value && input.value.trim().length > 0) return true;
+            
+            return false;
         });
         return isSolved;
     } catch (e) { 
@@ -353,18 +361,36 @@ async function checkAltchaSuccess(page) {
 
 async function attemptAltchaClick(page) {
     try {
-        const altchaWidget = page.locator('altcha-widget');
-        if (await altchaWidget.count() > 0 && await altchaWidget.isVisible({ timeout: 500 }).catch(() => false)) {
+        const altchaWidget = page.locator('altcha-widget').first();
+        if (await altchaWidget.count() > 0) {
             
             if (await checkAltchaSuccess(page)) return false; // 已经过了就不点了
 
-            const box = await altchaWidget.boundingBox();
-            if (box) {
-                // 根据截图：复选框在 widget 最左边。所以我们在 X 轴向右偏移一点点 (比如 25px)，Y 轴取居中
-                const clickX = box.x + 25; 
+            // 稍微等待弹窗动画结束，确保元素不在移动中
+            await page.waitForTimeout(500);
+
+            // 强制滚动到视图内
+            await altchaWidget.scrollIntoViewIfNeeded().catch(() => {});
+
+            // 用更底层的原生方法去拿实际尺寸和坐标 (无视 isVisible 状态)
+            let box = await altchaWidget.boundingBox();
+            if (!box) {
+                box = await page.evaluate(() => {
+                    const el = document.querySelector('altcha-widget');
+                    if (!el) return null;
+                    const rect = el.getBoundingClientRect();
+                    return { x: rect.left, y: rect.top, width: rect.width, height: rect.height };
+                });
+            }
+
+            if (box && box.width > 0 && box.height > 0) {
+                // 根据你的截图：复选框在 widget 最左边。所以我们在 X 轴向右偏移 30px，Y 轴取高度的一半
+                const clickX = box.x + 30; 
                 const clickY = box.y + box.height / 2;
-                console.log(`>> 发现 ALTCHA 组件，计算点击坐标...`);
+                console.log(`>> 发现 ALTCHA 组件 [宽:${box.width}, 高:${box.height}]，计算点击坐标: (${clickX.toFixed(2)}, ${clickY.toFixed(2)})`);
                 return await dispatchCdpClick(page, clickX, clickY);
+            } else {
+                console.log('>> 找到了 ALTCHA 元素，但获取不到有效大小 (长宽为0)，跳过点击。');
             }
         }
     } catch (e) {
@@ -373,7 +399,7 @@ async function attemptAltchaClick(page) {
     return false;
 }
 
-async function solveAltchaIfPresent(page, stageName = "Renew阶段", maxAttempts = 10, waitAfterClick = 8000) {
+async function solveAltchaIfPresent(page, stageName = "Renew阶段", maxAttempts = 15, waitAfterClick = 8000) {
     console.log(`[${stageName}] 开始检测 ALTCHA Captcha...`);
     let sawAltcha = false;
     
@@ -389,15 +415,24 @@ async function solveAltchaIfPresent(page, stageName = "Renew阶段", maxAttempts
         const clicked = await attemptAltchaClick(page);
         if (clicked) {
             sawAltcha = true;
-            // ALTCHA 使用 PoW (Proof of Work) 算法，点击后会在浏览器后台进行哈希计算，需要消耗一定时间
+            // ALTCHA 使用 PoW (Proof of Work) 算法，点击后会在浏览器后台进行哈希计算
             console.log(`[${stageName}] 已点击 ALTCHA，等待 PoW 哈希计算完成 (${waitAfterClick}ms)...`);
-            await page.waitForTimeout(waitAfterClick);
+            
+            // 循环轮询等待验证通过，而不是死等
+            let powSolved = false;
+            for(let w = 0; w < (waitAfterClick / 1000); w++) {
+                await page.waitForTimeout(1000);
+                if (await checkAltchaSuccess(page)) {
+                    powSolved = true;
+                    break;
+                }
+            }
 
-            if (await checkAltchaSuccess(page)) {
+            if (powSolved) {
                 console.log(`[${stageName}] ✅ ALTCHA 验证通过 (PoW 计算完成)！`);
                 return true;
             }
-            console.log(`[${stageName}] ⚠️ 验证尚未通过 (可能是算力较慢或需要重试)，继续循环...`);
+            console.log(`[${stageName}] ⚠️ 验证尚未通过 (可能是机器算力较慢)，继续重试...`);
         }
         
         if (i < maxAttempts - 1) await page.waitForTimeout(1000);
@@ -416,6 +451,7 @@ async function solveAltchaIfPresent(page, stageName = "Renew阶段", maxAttempts
 // =============== 主循环执行 =================
 // ==========================================
 (async () => {
+    // 💡 提示：如果跑出了“用户 2”，说明你的 USERS_JSON 环境变量里配置了两个账号。
     const users = getUsers();
     if (users.length === 0) {
         console.log('未在 process.env.USERS_JSON 中找到用户');
