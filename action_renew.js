@@ -204,7 +204,7 @@ async function configurePageViewport(page) {
 }
 
 async function saveViewportScreenshot(page, imagePath) {
-    await page.screenshot({ path: imagePath, fullPage: false });
+    await page.screenshot({ path: imagePath, fullPage: true });
 }
 
 function maskUsernameForLog(username) {
