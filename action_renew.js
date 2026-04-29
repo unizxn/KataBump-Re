@@ -46,6 +46,9 @@ chromium.use(stealth);
 
 const CHROME_PATH = process.env.CHROME_PATH || '/usr/bin/google-chrome';
 const DEBUG_PORT = 9222;
+const VIEWPORT_WIDTH = 1280;
+const VIEWPORT_HEIGHT = 720;
+const RENEW_MAX_ATTEMPTS = 3;
 process.env.NO_PROXY = 'localhost,127.0.0.1';
 
 const HTTP_PROXY = process.env.HTTP_PROXY;
@@ -166,7 +169,7 @@ async function launchChrome() {
         '--no-first-run',
         '--no-default-browser-check',
         '--disable-gpu',
-        '--window-size=1280,720',
+        `--window-size=${VIEWPORT_WIDTH},${VIEWPORT_HEIGHT}`,
         '--no-sandbox',
         '--disable-setuid-sandbox',
         '--user-data-dir=/tmp/chrome_user_data',
@@ -189,6 +192,19 @@ async function launchChrome() {
     if (!await checkPort(DEBUG_PORT)) {
         throw new Error('Chrome 启动失败');
     }
+}
+
+async function configurePageViewport(page) {
+    try {
+        await page.setViewportSize({ width: VIEWPORT_WIDTH, height: VIEWPORT_HEIGHT });
+        console.log(`[视口] 已设置为 ${VIEWPORT_WIDTH}x${VIEWPORT_HEIGHT}`);
+    } catch (e) {
+        console.log('[视口] 设置失败:', e.message);
+    }
+}
+
+async function saveViewportScreenshot(page, imagePath) {
+    await page.screenshot({ path: imagePath, fullPage: false });
 }
 
 function getUsers() {
@@ -257,6 +273,13 @@ async function attemptTurnstileCdp(page) {
 
 // --- 辅助函数：检查 Turnstile 是否已通过验证 ---
 async function checkTurnstileSuccess(page) {
+    try {
+        const hasResponseToken = await page.locator('input[name="cf-turnstile-response"], textarea[name="cf-turnstile-response"], input[name="g-recaptcha-response"], textarea[name="g-recaptcha-response"]').evaluateAll(elements => {
+            return elements.some(el => el.value && el.value.trim().length > 0);
+        });
+        if (hasResponseToken) return true;
+    } catch (e) { }
+
     const frames = page.frames();
     for (const f of frames) {
         if (f.url().includes('cloudflare')) {
@@ -270,10 +293,31 @@ async function checkTurnstileSuccess(page) {
     return false;
 }
 
+async function hasTurnstileFrame(page) {
+    for (const f of page.frames()) {
+        const url = f.url().toLowerCase();
+        if (url.includes('challenges.cloudflare.com') || url.includes('turnstile')) {
+            return true;
+        }
+    }
+
+    try {
+        const count = await page.locator('iframe[src*="challenges.cloudflare.com"], iframe[src*="turnstile"], iframe[title*="Cloudflare"], iframe[title*="Turnstile"]').count();
+        return count > 0;
+    } catch (e) {
+        return false;
+    }
+}
+
 // --- 通用过盾循环 ---
 async function solveTurnstileIfPresent(page, stageName = "通用", maxAttempts = 10, waitAfterClick = 5000) {
     console.log(`[${stageName}] 开始检测 Cloudflare Turnstile...`);
+    let sawTurnstile = false;
     for (let i = 0; i < maxAttempts; i++) {
+        if (await hasTurnstileFrame(page)) {
+            sawTurnstile = true;
+        }
+
         // 先检查是否已经通过
         if (await checkTurnstileSuccess(page)) {
             console.log(`[${stageName}] ✅ Turnstile 已通过验证。`);
@@ -282,6 +326,7 @@ async function solveTurnstileIfPresent(page, stageName = "通用", maxAttempts =
 
         const clicked = await attemptTurnstileCdp(page);
         if (clicked) {
+            sawTurnstile = true;
             console.log(`[${stageName}] 已点击 Turnstile，等待验证结果 (${waitAfterClick}ms)...`);
             await page.waitForTimeout(waitAfterClick);
 
@@ -294,7 +339,11 @@ async function solveTurnstileIfPresent(page, stageName = "通用", maxAttempts =
         }
         if (i < maxAttempts - 1) await page.waitForTimeout(1000);
     }
-    console.log(`[${stageName}] 未检测到 Turnstile 或未能通过验证。`);
+    if (!sawTurnstile) {
+        console.log(`[${stageName}] 未检测到 Turnstile。`);
+        return true;
+    }
+    console.log(`[${stageName}] 检测到 Turnstile，但未能通过验证。`);
     return false;
 }
 
@@ -334,6 +383,7 @@ async function solveTurnstileIfPresent(page, stageName = "通用", maxAttempts =
     }
     let page = context.pages().length > 0 ? context.pages()[0] : await context.newPage();
     page.setDefaultTimeout(60000);
+    await configurePageViewport(page);
 
     // --- 代理认证处理 ---
     if (PROXY_CONFIG && PROXY_CONFIG.username) {
@@ -405,7 +455,7 @@ async function solveTurnstileIfPresent(page, stageName = "通用", maxAttempts =
                         if (!fs.existsSync(failPhotoDir)) fs.mkdirSync(failPhotoDir, { recursive: true });
                         const failSafe = user.username.replace(/[^a-z0-9]/gi, '_');
                         const failScreenshot = path.join(failPhotoDir, `${failSafe}_login_fail.png`);
-                        try { await page.screenshot({ path: failScreenshot, fullPage: true }); } catch (e) {}
+                        try { await saveViewportScreenshot(page, failScreenshot); } catch (e) {}
                         await sendTelegramMessage(`❌ *${escapeMarkdown(user.username)}*\n登录失败: 账号或密码错误`, failScreenshot);
                         // 截图逻辑...
                         continue;
@@ -430,14 +480,15 @@ async function solveTurnstileIfPresent(page, stageName = "通用", maxAttempts =
 
             // 3. Renew 逻辑
             let renewSuccess = false;
-            for (let attempt = 1; attempt <= 10; attempt++) {
+            let renewFailureReason = `续期失败，${RENEW_MAX_ATTEMPTS}次尝试均未成功`;
+            for (let attempt = 1; attempt <= RENEW_MAX_ATTEMPTS; attempt++) {
                 // 如果页面不在预期位置，直接退出
                 if (page.url().includes('login')) {
                     console.log('页面被重定向到登录页，退出 Renew 循环。');
                     break;
                 }
 
-                console.log(`\n[尝试 ${attempt}/10] 正在寻找 Renew 按钮...`);
+                console.log(`\n[尝试 ${attempt}/${RENEW_MAX_ATTEMPTS}] 正在寻找 Renew 按钮...`);
                 const renewBtn = page.getByRole('button', { name: 'Renew', exact: true }).first();
                 
                 try { await renewBtn.waitFor({ state: 'visible', timeout: 5000 }); } catch (e) { }
@@ -458,10 +509,6 @@ async function solveTurnstileIfPresent(page, stageName = "通用", maxAttempts =
                         if (box) await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2, { steps: 5 });
                     } catch (e) { }
 
-                    // === 【复用逻辑】使用封装好的函数解决 Renew 弹窗里的盾 ===
-                    await solveTurnstileIfPresent(page, "Renew阶段", 30, 8000);
-                    // ====================================================
-
                     // 点击模态框内的 Confirm/Renew
                     const confirmBtn = modal.getByRole('button', { name: 'Renew' });
                     if (await confirmBtn.isVisible()) {
@@ -471,10 +518,23 @@ async function solveTurnstileIfPresent(page, stageName = "通用", maxAttempts =
                         const safeUsername = user.username.replace(/[^a-z0-9]/gi, '_');
                         const tsScreenshotName = `${safeUsername}_Turnstile_${attempt}.png`;
                         try {
-                            await page.screenshot({ path: path.join(photoDir, tsScreenshotName), fullPage: true });
+                            await saveViewportScreenshot(page, path.join(photoDir, tsScreenshotName));
                             console.log(`   >> 截图已保存: ${tsScreenshotName}`);
                         } catch (e) {
                             console.log('   >> 截图失败:', e.message);
+                        }
+                        const turnstileOk = await solveTurnstileIfPresent(page, "Renew阶段", 15, 5000);
+
+                        if (!turnstileOk) {
+                            renewFailureReason = `续期失败，Renew 阶段 Captcha 未通过（已重试 ${RENEW_MAX_ATTEMPTS} 次）`;
+                            console.log('   >> Captcha 未通过，跳过确认按钮并刷新重试...');
+                            await page.reload();
+                            await page.waitForTimeout(3000);
+                            if (page.url().includes('login')) {
+                                console.log('   >> 刷新后被重定向到登录页，退出。');
+                                break;
+                            }
+                            continue;
                         }
 
                         console.log('   >> 点击 Renew 确认按钮...');
@@ -499,7 +559,7 @@ async function solveTurnstileIfPresent(page, stageName = "通用", maxAttempts =
                                     renewSuccess = true; // 视为完成
                                     // 截图
                                     const skipScreenshot = path.join(photoDir, `${safeUsername}_skip.png`);
-                                    try { await page.screenshot({ path: skipScreenshot, fullPage: true }); } catch (e) {}
+                                    try { await saveViewportScreenshot(page, skipScreenshot); } catch (e) {}
                                     await sendTelegramMessage(`⏳ *${escapeMarkdown(user.username)}*\n暂无法续期，下次可续期时间: ${dateStr}`, skipScreenshot);
                                     try { 
                                         const closeBtn = modal.getByLabel('Close'); 
@@ -514,6 +574,7 @@ async function solveTurnstileIfPresent(page, stageName = "通用", maxAttempts =
                         if (renewSuccess) break;
 
                         if (hasCaptchaError) {
+                            renewFailureReason = `续期失败，Renew 阶段 Captcha 未通过（已重试 ${RENEW_MAX_ATTEMPTS} 次）`;
                             console.log('   >> 验证码未通过，刷新页面重试...');
                             await page.reload();
                             await page.waitForTimeout(3000);
@@ -529,7 +590,7 @@ async function solveTurnstileIfPresent(page, stageName = "通用", maxAttempts =
                         if (!await modal.isVisible()) {
                             console.log('   >> ✅ Renew successful!');
                             const successScreenshot = path.join(photoDir, `${safeUsername}_success.png`);
-                            try { await page.screenshot({ path: successScreenshot, fullPage: true }); } catch (e) {}
+                            try { await saveViewportScreenshot(page, successScreenshot); } catch (e) {}
                             await sendTelegramMessage(`✅ *${escapeMarkdown(user.username)}*\n续期成功！`, successScreenshot);
                             renewSuccess = true;
                             break;
@@ -566,8 +627,8 @@ async function solveTurnstileIfPresent(page, stageName = "通用", maxAttempts =
                 if (!fs.existsSync(failDir)) fs.mkdirSync(failDir, { recursive: true });
                 const failSafe = user.username.replace(/[^a-z0-9]/gi, '_');
                 const failScreenshot = path.join(failDir, `${failSafe}_renew_fail.png`);
-                try { await page.screenshot({ path: failScreenshot, fullPage: true }); } catch (e) {}
-                await sendTelegramMessage(`❌ *${escapeMarkdown(user.username)}*\n续期失败，10次尝试均未成功`, failScreenshot);
+                try { await saveViewportScreenshot(page, failScreenshot); } catch (e) {}
+                await sendTelegramMessage(`❌ *${escapeMarkdown(user.username)}*\n${renewFailureReason}`, failScreenshot);
             }
 
         } catch (err) {
@@ -579,7 +640,7 @@ async function solveTurnstileIfPresent(page, stageName = "通用", maxAttempts =
         if (!fs.existsSync(photoDir)) fs.mkdirSync(photoDir, { recursive: true });
         const safeUsername = user.username.replace(/[^a-z0-9]/gi, '_');
         try {
-            await page.screenshot({ path: path.join(photoDir, `${safeUsername}.png`), fullPage: true });
+            await saveViewportScreenshot(page, path.join(photoDir, `${safeUsername}.png`));
         } catch (e) {}
 
         console.log(`用户处理完成\n`);
