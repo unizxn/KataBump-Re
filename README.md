@@ -1,4 +1,3 @@
-```markdown
 # Katabump Server Auto-Renewal Tool
 
 > 用于自动续期 Katabump 服务器的自动化脚本。利用 Playwright + CDP (Chrome DevTools Protocol) 模拟用户操作，有效绕过 Cloudflare Turnstile 与 ALTCHA 验证码，确保持续的服务器服务。
@@ -151,4 +150,3 @@ socks5://username:password@127.0.0.1:1080
 ## 📜 License
 
 MIT License
-```
