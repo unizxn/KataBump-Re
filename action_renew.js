@@ -143,26 +143,8 @@ async function checkProxy() {
   if (!PROXY_CONFIG) return true;
   console.log('[代理] 正在验证代理连接...');
   try {
-    if (PROXY_CONFIG.type === 'socks5') {
-      const agent = new SocksProxyAgent(PROXY_CONFIG.server);
-      await axios.get('https://1.1.1.1', { httpsAgent: agent, timeout: 10000 });
-    } else {
-      const axiosConfig = {
-        proxy: {
-          protocol: 'http',
-          host: new URL(PROXY_CONFIG.server).hostname,
-          port: parseInt(new URL(PROXY_CONFIG.server).port, 10),
-        },
-        timeout: 10000
-      };
-      if (PROXY_CONFIG.username && PROXY_CONFIG.password) {
-        axiosConfig.proxy.auth = {
-          username: PROXY_CONFIG.username,
-          password: PROXY_CONFIG.password
-        };
-      }
-      await axios.get('https://1.1.1.1', axiosConfig);
-    }
+    const agent = new ProxyAgent(PROXY_CONFIG.server);
+    await axios.get('https://1.1.1.1', { httpsAgent: agent, timeout: 10000 });
     console.log('[代理] 连接成功！');
     return true;
   } catch (error) {
