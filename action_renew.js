@@ -5,14 +5,13 @@ const fs = require('fs');
 const path = require('path');
 const { spawn } = require('child_process');
 const http = require('http');
-const { ProxyAgent } = require('proxy-agent');
 
 const TG_BOT_TOKEN = process.env.TG_BOT_TOKEN;
 const TG_CHAT_ID = process.env.TG_CHAT_ID;
 
 // --- 辅助函数：转义 Telegram Markdown v1 特殊字符 ---
 function escapeMarkdown(text) {
-  return text.replace(/([_\*\`\\[\]])/g, '\$1');
+  return text.replace(/([_\*\`\\\[\]])/g, '\\$1');
 }
 
 // --- 辅助函数：发送 Telegram（图文合并为一条消息） ---
@@ -53,10 +52,9 @@ const RENEW_MAX_ATTEMPTS = 3;
 process.env.NO_PROXY = 'localhost,127.0.0.1';
 
 // ============================================================
-// 代理配置解析（支持 HTTP / SOCKS5）
+// 代理配置（仅支持 HTTP，SOCKS5 由 gost 在 Actions 中转）
 // ============================================================
 const HTTP_PROXY = process.env.HTTP_PROXY;
-const SOCKS5_PROXY = process.env.SOCKS5_PROXY;
 let PROXY_CONFIG = null;
 
 if (HTTP_PROXY) {
@@ -71,23 +69,6 @@ if (HTTP_PROXY) {
     console.log(`[代理] 检测到 HTTP 配置: 服务器=***, 认证=${PROXY_CONFIG.username ? '是' : '否'}`);
   } catch (e) {
     console.error('[代理] HTTP_PROXY 格式无效。');
-    process.exit(1);
-  }
-} else if (SOCKS5_PROXY) {
-  try {
-    const proxyUrl = new URL(SOCKS5_PROXY);
-    PROXY_CONFIG = {
-      type: 'socks5',
-      protocol: proxyUrl.protocol,
-      hostname: proxyUrl.hostname,
-      port: proxyUrl.port,
-      server: `${proxyUrl.protocol}//${proxyUrl.hostname}:${proxyUrl.port}`,
-      username: proxyUrl.username ? decodeURIComponent(proxyUrl.username) : undefined,
-      password: proxyUrl.password ? decodeURIComponent(proxyUrl.password) : undefined
-    };
-    console.log(`[代理] 检测到 SOCKS5 配置: 服务器=***, 认证=${PROXY_CONFIG.username ? '是' : '否'}`);
-  } catch (e) {
-    console.error('[代理] SOCKS5_PROXY 格式无效。');
     process.exit(1);
   }
 }
@@ -143,8 +124,21 @@ async function checkProxy() {
   if (!PROXY_CONFIG) return true;
   console.log('[代理] 正在验证代理连接...');
   try {
-    const agent = new ProxyAgent(PROXY_CONFIG.server);
-    await axios.get('https://1.1.1.1', { httpsAgent: agent, timeout: 10000 });
+    const axiosConfig = {
+      proxy: {
+        protocol: 'http',
+        host: new URL(PROXY_CONFIG.server).hostname,
+        port: parseInt(new URL(PROXY_CONFIG.server).port, 10),
+      },
+      timeout: 10000
+    };
+    if (PROXY_CONFIG.username && PROXY_CONFIG.password) {
+      axiosConfig.proxy.auth = {
+        username: PROXY_CONFIG.username,
+        password: PROXY_CONFIG.password
+      };
+    }
+    await axios.get('https://1.1.1.1', axiosConfig);
     console.log('[代理] 连接成功！');
     return true;
   } catch (error) {
@@ -186,12 +180,7 @@ async function launchChrome() {
     '--disable-dev-shm-usage'
   ];
   if (PROXY_CONFIG) {
-    if (PROXY_CONFIG.type === 'socks5' && PROXY_CONFIG.username) {
-      const auth = `${encodeURIComponent(PROXY_CONFIG.username)}:${encodeURIComponent(PROXY_CONFIG.password)}`;
-      args.push(`--proxy-server=${PROXY_CONFIG.protocol}//${auth}@${PROXY_CONFIG.hostname}:${PROXY_CONFIG.port}`);
-    } else {
-      args.push(`--proxy-server=${PROXY_CONFIG.server}`);
-    }
+    args.push(`--proxy-server=${PROXY_CONFIG.server}`);
     args.push('--proxy-bypass-list=<-loopback>');
   }
   const chrome = spawn(CHROME_PATH, args, {
@@ -690,8 +679,8 @@ async function solveAltchaIfPresent(page, stageName = "Renew阶段", maxAttempts
   page.setDefaultTimeout(60000);
   await configurePageViewport(page);
 
-  // --- HTTP 代理认证处理（SOCKS5 由 Chrome 自身处理） ---
-  if (PROXY_CONFIG && PROXY_CONFIG.type === 'http' && PROXY_CONFIG.username) {
+  // --- HTTP 代理认证处理 ---
+  if (PROXY_CONFIG && PROXY_CONFIG.username) {
     console.log('[代理] 设置 HTTP 代理认证拦截...');
     await context.route('**/*', (route) => {
       route.continue({
@@ -944,6 +933,17 @@ async function solveAltchaIfPresent(page, stageName = "Renew阶段", maxAttempts
 
     } catch (err) {
       console.error(`Error processing user:`, err);
+      // 新增：外层异常也推送 Telegram，避免静默失败
+      const errMsg = err.message || String(err);
+      const errPhotoDir = path.join(process.cwd(), 'screenshots');
+      if (!fs.existsSync(errPhotoDir)) fs.mkdirSync(errPhotoDir, { recursive: true });
+      const errSafe = user.username.replace(/[^a-z0-9]/gi, '_');
+      const errScreenshot = path.join(errPhotoDir, `${errSafe}_error.png`);
+      try { await saveViewportScreenshot(page, errScreenshot); } catch (e) {}
+      await sendTelegramMessage(
+        `❌ *${escapeMarkdown(user.username)}*\n处理异常: ${escapeMarkdown(errMsg.slice(0, 200))}`,
+        fs.existsSync(errScreenshot) ? errScreenshot : null
+      );
     }
 
     const photoDir = path.join(process.cwd(), 'screenshots');

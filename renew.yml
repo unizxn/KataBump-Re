@@ -1,0 +1,69 @@
+name: Katabump Auto Renew
+
+on:
+  schedule:
+    # 每天 UTC 21点 (北京时间 5点) 运行
+    - cron: '0 21 * * *'
+  workflow_dispatch: # 允许手动触发
+
+jobs:
+  renew:
+    runs-on: ubuntu-latest
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: '20'
+
+      - name: Install Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb
+          npm install
+          npx playwright install-deps chrome
+
+      - name: 🔄 启动 SOCKS5 转 HTTP 转发
+        env:
+          SOCKS5_PROXY: ${{ secrets.SOCKS5_PROXY }}
+        run: |
+          if [ -z "$SOCKS5_PROXY" ]; then
+            echo "⚠️ 未设置 SOCKS5_PROXY，跳过转发。"
+            exit 0
+          fi
+
+          # 安装 gost
+          wget -q https://github.com/ginuerzh/gost/releases/download/v2.11.5/gost-linux-amd64-2.11.5.gz
+          gunzip gost-linux-amd64-2.11.5.gz
+          mv gost-linux-amd64-2.11.5 gost
+          chmod +x gost
+
+          # 启动转发: 本地 8080 -> SOCKS5
+          nohup ./gost -L http://127.0.0.1:8080 -F "$SOCKS5_PROXY" > gost.log 2>&1 &
+          sleep 3
+
+          echo "✅ SOCKS5 转 HTTP 已启动"
+
+          # 验证本地代理
+          export http_proxy=http://127.0.0.1:8080
+          export https_proxy=http://127.0.0.1:8080
+          curl -s --connect-timeout 10 -o /dev/null -w "%{http_code}" https://1.1.1.1 | grep -q "200" && echo "✅ 转发验证成功" || echo "⚠️ 转发验证失败"
+
+      - name: 🚀 运行续期脚本
+        env:
+          USERS_JSON: ${{ secrets.USERS_JSON }}
+          HTTP_PROXY: http://127.0.0.1:8080
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+        run: xvfb-run --auto-servernum --server-args="-screen 0 1280x720x24" node action_renew.js
+
+      - name: Upload Screenshots
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: screenshots
+          path: screenshots/
