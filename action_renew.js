@@ -138,7 +138,8 @@ async function checkProxy() {
         password: PROXY_CONFIG.password
       };
     }
-    await axios.get('https://1.1.1.1', axiosConfig);
+    // 改用 httpbin 验证，避免 1.1.1.1 的 400 响应
+    await axios.get('https://httpbin.org/ip', axiosConfig);
     console.log('[代理] 连接成功！');
     return true;
   } catch (error) {
