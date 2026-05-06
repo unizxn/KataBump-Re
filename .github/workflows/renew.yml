@@ -2,8 +2,9 @@ name: Katabump Auto Renew
 
 on:
   schedule:
+    # 每天 UTC 21点 (北京时间 5点) 运行
     - cron: '0 21 * * *'
-  workflow_dispatch:
+  workflow_dispatch: # 允许手动触发
 
 jobs:
   renew:
@@ -34,23 +35,26 @@ jobs:
             echo "⚠️ 未设置 SOCKS5_PROXY，跳过转发。"
             exit 0
           fi
-          
+
           # 安装 gost
           wget -q https://github.com/ginuerzh/gost/releases/download/v2.11.5/gost-linux-amd64-2.11.5.gz
           gunzip gost-linux-amd64-2.11.5.gz
           mv gost-linux-amd64-2.11.5 gost
           chmod +x gost
-          
-          # 启动转发: 本地 8080 -> SOCKS5
-          nohup ./gost -L http://127.0.0.1:8080 -F "$SOCKS5_PROXY" > gost.log 2>&1 &
+
+          # 启动转发: 本地 8080 (无认证) -> SOCKS5
+          nohup ./gost -L "http://:8080" -F "$SOCKS5_PROXY" > gost.log 2>&1 &
           sleep 3
-          
+
+          echo "=== gost 日志 ==="
+          cat gost.log || true
+
           echo "✅ SOCKS5 转 HTTP 已启动"
-          
-          # 验证本地代理
+
+          # 验证本地代理 (使用 httpbin 而不是 1.1.1.1)
           export http_proxy=http://127.0.0.1:8080
           export https_proxy=http://127.0.0.1:8080
-          curl -s --connect-timeout 10 -o /dev/null -w "%{http_code}" https://1.1.1.1 | grep -q "200" && echo "✅ 转发验证成功" || echo "⚠️ 转发验证失败"
+          curl -s --connect-timeout 10 https://httpbin.org/ip && echo "✅ 转发验证成功" || echo "⚠️ 转发验证失败"
 
       - name: 🚀 运行续期脚本
         env:
