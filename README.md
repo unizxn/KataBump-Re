@@ -70,7 +70,7 @@ socks5://username:password@127.0.0.1:1080
 1. GitHub Actions 运行环境安装 **gost**（v2.11.5）。
 2. gost 在本地 `127.0.0.1:8080` 启动 HTTP 入站代理，后端连接你的 SOCKS5 代理。
 3. Chrome 浏览器通过 `--proxy-server=http://127.0.0.1:8080` 走本地 HTTP 代理。
-4. 运行前自动验证代理连通性（`https://httpbin.org/ip`）。
+4. 运行前通过 `curl` 验证代理连通性（`https://httpbin.org/ip`）。
 5. **日志中代理服务器地址自动脱敏显示为 `***`**，防止公开仓库泄露节点信息。
 
 > ⚠️ 为什么不直接传 SOCKS5 给 Chrome？因为 Chrome 的 `--proxy-server` 对 SOCKS5 认证支持极差，会报 `ERR_NO_SUPPORTED_PROXIES`。通过 gost 中转是稳定方案。

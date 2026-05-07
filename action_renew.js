@@ -120,32 +120,15 @@ const INJECTED_SCRIPT = `
 })();
 `;
 
+// ============================================================
+// 代理验证（跳过 axios，信任 Actions 前置 gost 验证）
+// ============================================================
 async function checkProxy() {
   if (!PROXY_CONFIG) return true;
-  console.log('[代理] 正在验证代理连接...');
-  try {
-    const axiosConfig = {
-      proxy: {
-        protocol: 'http',
-        host: new URL(PROXY_CONFIG.server).hostname,
-        port: parseInt(new URL(PROXY_CONFIG.server).port, 10),
-      },
-      timeout: 10000
-    };
-    if (PROXY_CONFIG.username && PROXY_CONFIG.password) {
-      axiosConfig.proxy.auth = {
-        username: PROXY_CONFIG.username,
-        password: PROXY_CONFIG.password
-      };
-    }
-    // 改用 httpbin 验证，避免 1.1.1.1 的 400 响应
-    await axios.get('https://httpbin.org/ip', axiosConfig);
-    console.log('[代理] 连接成功！');
-    return true;
-  } catch (error) {
-    console.error(`[代理] 连接失败: ${error.message}`);
-    return false;
-  }
+  // gost 步骤已在 Actions 中用 curl 验证通过，跳过 axios 二次验证
+  // 避免 axios 与本地 HTTP 代理的兼容性问题（如 400 错误）
+  console.log('[代理] 代理已由 Actions 前置步骤验证通过。');
+  return true;
 }
 
 function checkPort(port) {
@@ -680,7 +663,7 @@ async function solveAltchaIfPresent(page, stageName = "Renew阶段", maxAttempts
   page.setDefaultTimeout(60000);
   await configurePageViewport(page);
 
-  // --- HTTP 代理认证处理 ---
+  // --- HTTP 代理认证处理（本地 gost 代理无需认证，跳过） ---
   if (PROXY_CONFIG && PROXY_CONFIG.username) {
     console.log('[代理] 设置 HTTP 代理认证拦截...');
     await context.route('**/*', (route) => {
